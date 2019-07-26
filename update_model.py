@@ -29,14 +29,42 @@ def extract_game_data(sheet, sheet_name):
     rawdata = worksheet.get_all_values()
 
     df = pd.DataFrame(rawdata[1:], columns=rawdata[0])
-    assert all(c in df.columns for c in ['Date', 'Player A', 'Player B', 'Wins A', 'Wins B']), \
-        'Expecting columns Date, Player A, Player B, Wins A, Wins B'
+    assert all(c in df.columns for c in ['Date','Winner','Loser']), \
+        'Expecting columns Date, Winner, Loser'
+    
+    # Delete Blank Rows
+    df = df[df['Winner'] != ""]
 
-    df['Date'] = df['Date'].astype(datetime)
-    df['Wins A'] = df['Wins A'].astype(int)
-    df['Wins B'] = df['Wins B'].astype(int)
-
+    #FIXME DATE
+    #df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    #df['Wins A'] = df['Wins A'].astype(int)
+    #df['Wins B'] = df['Wins B'].astype(int)
+    
+    # Sort by Date
+    df = df.sort_values(by='Date', ascending=False)
+    
     return df
+
+def build_comparisons(game_data):
+    comp_data = {}
+    for game in game_data.itertuples():
+        if(game.Winner < game.Loser):
+            players = (game.Winner, game.Loser)
+            winA = 1
+            winB = 0
+        else:
+            players = (game.Loser, game.Winner)
+            winA = 0
+            winB = 1
+        results = comp_data.get(players, (0,0))
+        num_games = results[0] + results [1]
+        if(num_games < 5):
+            comp_data[players] = (results[0] + winA, results[1] + winB)
+    df_data = []
+    for comp in comp_data:
+        df_data.append([comp[0], comp[1], comp_data[comp][0], comp_data[comp][1]])
+    df = pd.DataFrame(data=df_data, columns=['Player A', 'Player B', 'Wins A', 'Wins B'])
+    return df  
 
 
 def add_dummy_games(game_data, alpha=1):
@@ -47,10 +75,9 @@ def add_dummy_games(game_data, alpha=1):
     players = sorted(list(set(game_data['Player A']) | set(game_data['Player B'])))
 
     # Add dummy games
-    dummy_data = [[datetime(2000, 1, 1), p, DUMMY_PLAYER, alpha, alpha] for p in players]
+    dummy_data = [[p, DUMMY_PLAYER, alpha, alpha] for p in players]
     df = pd.DataFrame(dummy_data, columns=game_data.columns)
     df = pd.concat([game_data, df])
-    df
 
     return df
 
@@ -100,11 +127,12 @@ def compute_rank_scores(game_data, max_iters=1000, error_tol=1e-3):
 
     del ranks[DUMMY_PLAYER]
 
-    # Scale logarithm of score to be between 1 and 1000
+    # Scale score to be between 1 and 1000
     ranks = ranks.sort_values(ascending=False) \
                  .apply(lambda x: np.log1p(1000 * x) / np.log1p(1000) * 1000) \
                  .astype(int) \
                  .clip(1)
+    #ranks = (1000 * ranks.sort_values(ascending=False)).astype(int).clip(1)
 
     return ranks
 
@@ -129,9 +157,11 @@ def upload_to_gsheets(sheet, ranks, rank_sheet):
 
     value_cells = worksheet.range(2, 2, len(ranks) + 1, 2)
     for cell, val in zip(value_cells, ranks.values):
-        cell.value = val
+        cell.value = int(val)
 
-    worksheet.update_cells(player_cells + value_cells)
+    worksheet.update_cells(player_cells)
+    worksheet.update_cells(value_cells)
+    #worksheet.update_cells(player_cells + value_cells)
 
 
 if __name__ == "__main__":
@@ -155,17 +185,29 @@ if __name__ == "__main__":
     game_data = extract_game_data(sheet, args.data_sheet)
     logging.info(" * Found %d rows.", len(game_data))
 
+    #print(game_data)
+
     if args.backup_dir:
         filename = "game_data-%d.csv.gz" % int(time.time())
         logging.info(" * Saving backup to '%s'", filename)
-        game_data.to_csv(os.path.join(args.backup_dir, filename),
+        in_order_gamedata = game_data.sort_values(by='Date')
+        in_order_gamedata.to_csv(os.path.join(args.backup_dir, filename),
                          compression='gzip', index=False)
 
+    logging.info("Building Comparison Table")
+    comp_data = build_comparisons(game_data)
+
+    #print(comp_data)
+    
     logging.info("Adding dummy game for regularization (alpha=%d)...", args.alpha)
-    game_data = add_dummy_games(game_data, args.alpha)
+    comp_data = add_dummy_games(comp_data, args.alpha)
+    
+    #print(comp_data)
 
     logging.info("Computing rank scores...")
-    ranks = compute_rank_scores(game_data)
+    ranks = compute_rank_scores(comp_data)
+
+    #print(ranks)
 
     logging.info("Uploading rank scores to sheet '%s'...", args.rank_sheet)
     upload_to_gsheets(sheet, ranks, args.rank_sheet)
